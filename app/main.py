@@ -141,7 +141,7 @@ async def mirror(request: Request, url: str = Query(..., description="Direct fil
     client = httpx.AsyncClient(
         follow_redirects=True,
         timeout=timeout,
-        http2=True
+        http2=False
     )
 
     try:
