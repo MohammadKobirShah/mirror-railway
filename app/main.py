@@ -1,198 +1,194 @@
-from fastapi import FastAPI, Query, HTTPException
-from fastapi.responses import StreamingResponse, HTMLResponse
+from fastapi import FastAPI, Request, HTTPException, Query
+from fastapi.responses import StreamingResponse, HTMLResponse, Response
+from starlette.background import BackgroundTask
 import httpx
 import re
-from urllib.parse import unquote
+from urllib.parse import unquote, urlparse
+from pathlib import PurePosixPath
 
-app = FastAPI(title="⚡ Cloudflare Edge Mirror", version="2.0")
+app = FastAPI(title="⚡ Cloudflare Edge Mirror", version="3.0")
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+BASE_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36",
     "Accept": "*/*",
-    "Accept-Encoding": "gzip, deflate, br",
+    "Accept-Encoding": "identity",
     "Connection": "keep-alive"
 }
 
+
+def extract_filename(source_url: str, headers) -> str:
+    cd = headers.get("content-disposition", "")
+
+    # filename*=UTF-8''name.ext
+    m = re.search(r"filename\*\s*=\s*UTF-8''([^;]+)", cd, re.IGNORECASE)
+    if m:
+        return unquote(m.group(1)).strip().strip('"')
+
+    # filename="name.ext"
+    m = re.search(r'filename\s*=\s*"([^"]+)"', cd, re.IGNORECASE)
+    if m:
+        return m.group(1).strip()
+
+    # filename=name.ext
+    m = re.search(r"filename\s*=\s*([^;]+)", cd, re.IGNORECASE)
+    if m:
+        return m.group(1).strip().strip('"')
+
+    path_name = PurePosixPath(urlparse(source_url).path).name
+    if path_name:
+        return unquote(path_name)
+
+    return "download.bin"
+
+
 @app.get("/", response_class=HTMLResponse)
 async def home():
-    html = """
+    return """
     <!DOCTYPE html>
     <html>
     <head>
-        <title>⚡ Pro Mirror Server</title>
+        <title>⚡ CF Mirror</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
         <style>
-            * { margin: 0; padding: 0; box-sizing: border-box; }
-            body { 
-                font-family: 'Segoe UI', sans-serif; 
-                background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
-                min-height: 100vh;
-                display: flex;
-                justify-content: center;
-                align-items: center;
-                color: #fff;
+            body{
+                font-family:Arial,sans-serif;
+                background:#0f172a;
+                color:#fff;
+                display:flex;
+                justify-content:center;
+                align-items:center;
+                min-height:100vh;
+                margin:0;
             }
-            .container {
-                background: rgba(255,255,255,0.05);
-                backdrop-filter: blur(10px);
-                border-radius: 20px;
-                padding: 40px;
-                max-width: 600px;
-                width: 90%;
-                box-shadow: 0 8px 32px rgba(0,0,0,0.3);
-                border: 1px solid rgba(255,255,255,0.1);
+            .box{
+                width:min(680px,92vw);
+                background:#111827;
+                padding:28px;
+                border-radius:18px;
+                box-shadow:0 10px 30px rgba(0,0,0,.35);
             }
-            h1 { 
-                font-size: 2.5em; 
-                margin-bottom: 10px;
-                background: linear-gradient(90deg, #f093fb, #f5576c);
-                -webkit-background-clip: text;
-                -webkit-text-fill-color: transparent;
+            input{
+                width:100%;
+                padding:14px;
+                border-radius:12px;
+                border:none;
+                margin:12px 0;
+                background:#1f2937;
+                color:#fff;
             }
-            .subtitle { color: #888; margin-bottom: 30px; }
-            input[type="text"] {
-                width: 100%;
-                padding: 15px 20px;
-                border: none;
-                border-radius: 10px;
-                background: rgba(255,255,255,0.1);
-                color: #fff;
-                font-size: 16px;
-                margin-bottom: 15px;
-                outline: none;
+            button{
+                width:100%;
+                padding:14px;
+                border:none;
+                border-radius:12px;
+                background:#2563eb;
+                color:#fff;
+                font-weight:700;
+                cursor:pointer;
             }
-            input::placeholder { color: #666; }
-            button {
-                width: 100%;
-                padding: 15px;
-                border: none;
-                border-radius: 10px;
-                background: linear-gradient(90deg, #f093fb, #f5576c);
-                color: #fff;
-                font-size: 18px;
-                font-weight: bold;
-                cursor: pointer;
-                transition: transform 0.2s, box-shadow 0.2s;
-            }
-            button:hover {
-                transform: translateY(-2px);
-                box-shadow: 0 5px 20px rgba(240,147,251,0.4);
-            }
-            .info {
-                margin-top: 30px;
-                padding: 20px;
-                background: rgba(0,0,0,0.2);
-                border-radius: 10px;
-                font-size: 14px;
-            }
-            code {
-                background: rgba(255,255,255,0.1);
-                padding: 3px 8px;
-                border-radius: 5px;
-                font-family: 'Fira Code', monospace;
-            }
-            .status { 
-                display: inline-block;
-                width: 10px; height: 10px;
-                background: #00ff88;
-                border-radius: 50%;
-                margin-right: 8px;
-                animation: pulse 2s infinite;
-            }
-            @keyframes pulse {
-                0%, 100% { opacity: 1; }
-                50% { opacity: 0.5; }
+            code{
+                background:#0b1220;
+                padding:3px 8px;
+                border-radius:8px;
             }
         </style>
     </head>
     <body>
-        <div class="container">
-            <h1>⚡ Pro Mirror</h1>
-            <p class="subtitle"><span class="status"></span>Cloudflare Edge Powered</p>
-            
-            <form id="mirrorForm">
-                <input type="text" id="urlInput" placeholder="পেস্ট করো ডিরেক্ট ডাউনলোড লিঙ্ক..." required>
-                <button type="submit">🚀 মিরর করো</button>
+        <div class="box">
+            <h1>⚡ Cloudflare Tunnel Mirror</h1>
+            <p>ডিরেক্ট লিংক পেস্ট করো, সার্ভার সেটা stream করবে।</p>
+            <form id="f">
+                <input id="u" type="text" placeholder="https://example.com/file.zip" required />
+                <button type="submit">Mirror Download</button>
             </form>
-            
-            <div class="info">
-                <p><strong>API ব্যবহার:</strong></p>
-                <p style="margin-top:10px"><code>GET /mirror?url=https://example.com/file.zip</code></p>
-            </div>
+            <p style="margin-top:16px"><code>/mirror?url=https://example.com/file.zip</code></p>
         </div>
-        
         <script>
-            document.getElementById('mirrorForm').addEventListener('submit', function(e) {
+            document.getElementById('f').addEventListener('submit', function(e){
                 e.preventDefault();
-                const url = document.getElementById('urlInput').value;
-                if(url) {
-                    window.location.href = '/mirror?url=' + encodeURIComponent(url);
-                }
+                const u = document.getElementById('u').value.trim();
+                if(u) location.href = '/mirror?url=' + encodeURIComponent(u);
             });
         </script>
     </body>
     </html>
     """
-    return html
 
 
-@app.get("/mirror")
-async def mirror(url: str = Query(..., description="Direct download URL")):
-    if not url.startswith(("http://", "https://")):
-        raise HTTPException(status_code=400, detail="URL must start with http:// or https://")
-
-    try:
-        async with httpx.AsyncClient(
-            follow_redirects=True, 
-            timeout=300.0,
-            limits=httpx.Limits(max_connections=100)
-        ) as client:
-            
-            # HEAD request first to get headers
-            head_resp = await client.head(url, headers=HEADERS)
-            content_length = head_resp.headers.get("content-length")
-            content_type = head_resp.headers.get("content-type", "application/octet-stream")
-            
-            # Extract filename
-            filename = "downloaded_file"
-            cd = head_resp.headers.get("content-disposition", "")
-            
-            if "filename=" in cd:
-                match = re.findall(r'filename\*?=["\']?(?:UTF-8\'\')?([^"\';]+)', cd, re.IGNORECASE)
-                if match:
-                    filename = unquote(match[0])
-            else:
-                path_filename = url.split("/")[-1].split("?")[0]
-                if path_filename and "." in path_filename:
-                    filename = unquote(path_filename)
-
-            # Stream the actual content
-            async def stream():
-                async with client.stream("GET", url, headers=HEADERS) as response:
-                    async for chunk in response.aiter_bytes(chunk_size=65536):
-                        yield chunk
-
-            response_headers = {
-                "Content-Disposition": f'attachment; filename="{filename}"',
-                "X-Mirror-Source": url[:100],
-                "X-Powered-By": "ENI-Mirror-v2",
-                "Cache-Control": "public, max-age=3600"
-            }
-            
-            if content_length:
-                response_headers["Content-Length"] = content_length
-
-            return StreamingResponse(
-                stream(),
-                media_type=content_type,
-                headers=response_headers
-            )
-
-    except httpx.TimeoutException:
-        raise HTTPException(status_code=504, detail="Source server timeout")
-    except httpx.RequestError as e:
-        raise HTTPException(status_code=502, detail=f"Failed to connect: {str(e)}")
+@app.get("/favicon.ico")
+async def favicon():
+    return Response(status_code=204)
 
 
 @app.get("/health")
 async def health():
-    return {"status": "alive", "server": "cloudflare-edge-mirror"}
+    return {"status": "ok"}
+
+
+@app.get("/mirror")
+async def mirror(request: Request, url: str = Query(..., description="Direct file URL")):
+    if not url.startswith(("http://", "https://")):
+        raise HTTPException(status_code=400, detail="URL must start with http:// or https://")
+
+    headers = dict(BASE_HEADERS)
+
+    # Resume support
+    range_header = request.headers.get("range")
+    if range_header:
+        headers["Range"] = range_header
+
+    timeout = httpx.Timeout(connect=30.0, read=None, write=60.0, pool=60.0)
+    client = httpx.AsyncClient(
+        follow_redirects=True,
+        timeout=timeout,
+        http2=True
+    )
+
+    try:
+        req = client.build_request("GET", url, headers=headers)
+        upstream = await client.send(req, stream=True)
+    except httpx.RequestError as e:
+        await client.aclose()
+        raise HTTPException(status_code=502, detail=f"Upstream connection failed: {str(e)}")
+
+    if upstream.status_code >= 400:
+        detail = f"Upstream returned {upstream.status_code}"
+        await upstream.aclose()
+        await client.aclose()
+        raise HTTPException(status_code=upstream.status_code, detail=detail)
+
+    filename = extract_filename(str(upstream.url), upstream.headers)
+    content_type = upstream.headers.get("content-type", "application/octet-stream")
+
+    response_headers = {
+        "Content-Disposition": f'attachment; filename="{filename}"',
+        "X-Mirror-Source": str(upstream.url)[:200],
+        "X-Powered-By": "ENI-CF-Mirror-v3",
+        "Cache-Control": "no-store"
+    }
+
+    passthrough_headers = [
+        "content-length",
+        "content-range",
+        "accept-ranges",
+        "etag",
+        "last-modified",
+        "content-encoding"
+    ]
+
+    for h in passthrough_headers:
+        if h in upstream.headers:
+            pretty = "-".join(part.capitalize() for part in h.split("-"))
+            response_headers[pretty] = upstream.headers[h]
+
+    async def cleanup():
+        await upstream.aclose()
+        await client.aclose()
+
+    return StreamingResponse(
+        upstream.aiter_raw(chunk_size=1024 * 64),
+        status_code=upstream.status_code,
+        media_type=content_type,
+        headers=response_headers,
+        background=BackgroundTask(cleanup)
+    )
